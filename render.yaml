@@ -1,23 +1,28 @@
-# Render Blueprint — deploys the Squid set-list app as a free web service.
-# https://render.com/docs/blueprint-spec
+# Render Blueprint — deploys the Squid set-list app as a free web service
+# backed by a free Postgres database. https://render.com/docs/blueprint-spec
 #
-# A small persistent disk holds the SQLite database so songs and set lists
-# survive restarts and redeploys (the rest of the filesystem is ephemeral).
+# The free web-service tier has no persistent disk, so data lives in a managed
+# Postgres database instead (DATABASE_URL is injected automatically). The app's
+# data layer uses Postgres when DATABASE_URL is set, SQLite otherwise.
+#
+# Note: Render's free Postgres instances expire ~90 days after creation and
+# need recreating. For this app that just means re-running the seed.
+databases:
+  - name: squid-db
+    plan: free
+
 services:
   - type: web
     name: squid-setlists
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    # 1 worker: SQLite is a single file and doesn't like concurrent writers.
     startCommand: gunicorn -w 1 -k uvicorn.workers.UvicornWorker python.main:app --bind 0.0.0.0:$PORT
     autoDeploy: true
-    disk:
-      name: squid-data
-      mountPath: /var/squid
-      sizeGB: 1
     envVars:
-      - key: SQUID_DB_PATH
-        value: /var/squid/squid.db
+      - key: DATABASE_URL
+        fromDatabase:
+          name: squid-db
+          property: connectionString
       - key: PYTHON_VERSION
         value: "3.12.9"

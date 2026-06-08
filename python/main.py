@@ -102,7 +102,7 @@ def _song_dict(row) -> dict:
 def list_songs():
     with db() as conn:
         rows = conn.execute(
-            "SELECT * FROM songs ORDER BY title COLLATE NOCASE"
+            "SELECT * FROM songs ORDER BY LOWER(title)"
         ).fetchall()
     return [_song_dict(r) for r in rows]
 
@@ -110,14 +110,14 @@ def list_songs():
 @app.post("/api/songs", status_code=201)
 def create_song(song: SongIn):
     with db() as conn:
-        cur = conn.execute(
+        new_id = conn.insert(
             """INSERT INTO songs (title, artist, key, structure, tempo_min, tempo_max,
                                   singer, length_min, notes)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (song.title, song.artist, song.key, song.structure,
              song.tempo_min, song.tempo_max, song.singer, song.length_min, song.notes),
         )
-        row = conn.execute("SELECT * FROM songs WHERE id = ?", (cur.lastrowid,)).fetchone()
+        row = conn.execute("SELECT * FROM songs WHERE id = ?", (new_id,)).fetchone()
     return _song_dict(row)
 
 
@@ -178,8 +178,8 @@ def list_setlists():
 @app.post("/api/setlists", status_code=201)
 def create_setlist(sl: SetlistIn):
     with db() as conn:
-        cur = conn.execute("INSERT INTO setlists (name) VALUES (?)", (sl.name,))
-        row = conn.execute("SELECT * FROM setlists WHERE id = ?", (cur.lastrowid,)).fetchone()
+        new_id = conn.insert("INSERT INTO setlists (name) VALUES (?)", (sl.name,))
+        row = conn.execute("SELECT * FROM setlists WHERE id = ?", (new_id,)).fetchone()
     return dict(row)
 
 
@@ -262,10 +262,9 @@ def duplicate_setlist(setlist_id: int):
         src = conn.execute("SELECT * FROM setlists WHERE id = ?", (setlist_id,)).fetchone()
         if not src:
             raise HTTPException(404, "Set list not found")
-        cur = conn.execute(
+        new_id = conn.insert(
             "INSERT INTO setlists (name) VALUES (?)", (f"{src['name']} (copy)",)
         )
-        new_id = cur.lastrowid
         conn.execute(
             """INSERT INTO setlist_items (setlist_id, song_id, section, position)
                SELECT ?, song_id, section, position
