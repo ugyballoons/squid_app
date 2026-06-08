@@ -1,0 +1,25 @@
+songs:
+  -
+    title: I Ain't Superstitious
+    artist: Howlin' Wolf
+    key: E
+    structure: twelve_bar
+    tempo_range: [80, 100]
+  -
+    title: Cross Road Blues
+    artist: Robert Johnson
+    key: A
+    structure: twelve_bar
+    tempo_range: [90, 110]
+  -
+    title: Boom Boom
+    artist: John Lee Hooker
+    key: E
+    structure: twelve_bar
+    tempo_range: [100, 120]
+  - 
+    title: Alabama Train
+    artist: Big Joe Williams/Bo Diddley
+    key: E
+    structure: one_chord
+    tempo_range: [80, 100]

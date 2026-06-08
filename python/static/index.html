@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1115">
+  <title>Squid Set Lists</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="bar">
+      <h1><span>♪</span> Squid Set Lists</h1>
+      <div class="tabs">
+        <button id="tab-songs" class="active" onclick="UI.show('songs')">All Songs</button>
+        <button id="tab-set" onclick="UI.show('set')">Set List</button>
+      </div>
+    </header>
+    <main id="view"></main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast" class="toast"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
