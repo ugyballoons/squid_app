@@ -1,0 +1,23 @@
+# Render Blueprint — deploys the Squid set-list app as a free web service.
+# https://render.com/docs/blueprint-spec
+#
+# A small persistent disk holds the SQLite database so songs and set lists
+# survive restarts and redeploys (the rest of the filesystem is ephemeral).
+services:
+  - type: web
+    name: squid-setlists
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # 1 worker: SQLite is a single file and doesn't like concurrent writers.
+    startCommand: gunicorn -w 1 -k uvicorn.workers.UvicornWorker python.main:app --bind 0.0.0.0:$PORT
+    autoDeploy: true
+    disk:
+      name: squid-data
+      mountPath: /var/squid
+      sizeGB: 1
+    envVars:
+      - key: SQUID_DB_PATH
+        value: /var/squid/squid.db
+      - key: PYTHON_VERSION
+        value: "3.12.9"
