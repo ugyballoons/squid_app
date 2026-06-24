@@ -42,8 +42,29 @@ python -m python.seed          # one-off: load python/seed.yaml into squid.db
 python -m uvicorn python.main:app --reload
 ```
 
-Then open http://127.0.0.1:8000 . In production the included `Procfile` runs it
-under gunicorn/uvicorn workers.
+Then open http://127.0.0.1:8000 .
+
+## Deploy on cPanel shared hosting (Python App / Passenger)
+
+This app runs on cPanel's **Setup Python App** (Phusion Passenger) with a MySQL
+database — no Node, no separate server process.
+
+1. **Create the MySQL database** in cPanel → *MySQL Databases*: a database, a
+   user, and grant the user all privileges on it. Note the full names (cPanel
+   prefixes them, e.g. `acct_squid` / `acct_dbuser`).
+2. **Setup Python App** → create an app: pick a Python 3.x version, set the
+   application root to this project, application URL to where it should serve,
+   and startup file `passenger_wsgi.py` with application object `application`.
+3. In that screen add an **environment variable** `DATABASE_URL` =
+   `mysql://<dbuser>:<password>@localhost/<dbname>` (URL-encode any odd
+   characters in the password). Setting it switches the app to MySQL; leaving it
+   unset uses local SQLite.
+4. Enter the app's virtualenv (the screen shows the `source …/bin/activate`
+   command) and run `pip install -r requirements.txt`, then
+   `python -m python.seed` once to load the starter songs. **Restart** the app.
+
+In production the `passenger_wsgi.py` entry point wraps the FastAPI app for
+Passenger's WSGI interface (`python/db.py` talks to MySQL via PyMySQL).
 
 ## Layout
 
@@ -51,7 +72,8 @@ under gunicorn/uvicorn workers.
 |------|---------|
 | `python/main.py`  | FastAPI app: JSON API + index + server-rendered print view |
 | `python/harp.py`  | Cross-harp key derivation (4th up), major/minor aware |
-| `python/db.py`    | SQLite schema and connection helper |
+| `python/db.py`    | DB layer: SQLite locally, MySQL in production (PyMySQL) |
+| `passenger_wsgi.py` | cPanel/Passenger WSGI entry point (wraps the ASGI app) |
 | `python/seed.py`  | Loads `seed.yaml` into the DB (only if empty) |
 | `python/static/`  | `index.html`, `style.css`, `app.js` (the whole UI) |
 
