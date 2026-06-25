@@ -7,9 +7,9 @@ import { State, Session, History, sectionNames, keepEmptySection } from './state
 import { $, toast } from './dom.js';
 import { API } from './api.js';
 import { persistOrder, applyOrderSnapshot, refreshUndoButtons } from './order.js';
-import { renderSongs } from './views/songs.js';
-import { renderSet } from './views/setlist.js';
-import { songForm } from './views/songForm.js';
+import { renderSongs } from './views/songs.jsx';
+import { renderSet } from './views/setlist.jsx';
+import { songForm } from './views/songForm.jsx';
 import { renumberPositions } from './drag.js';
 
 export const UI = {
