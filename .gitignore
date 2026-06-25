@@ -1,3 +1,6 @@
+# Node / frontend build tooling
+node_modules/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -7,10 +10,13 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+# Anchored to the repo root so they only catch setuptools output there, not the
+# committed frontend bundle at python/static/build/ (served on the host, which
+# has no Node build step).
 .Python
-build/
+/build/
 develop-eggs/
-dist/
+/dist/
 downloads/
 eggs/
 .eggs/
