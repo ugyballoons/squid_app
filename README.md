@@ -52,7 +52,16 @@ The UI is plain JS (no framework), split into ES modules under
 committed to the repo**, so the production host needs no Node — deploying is
 still just a `git pull`.
 
-You only need Node when you change the frontend JavaScript (files under
+The views use **JSX without React**: esbuild (via Vite) compiles `<div/>` to
+`h(...)` and `<>…</>` to `Fragment(...)` — our own factory in `src/dom.js` that
+returns *real DOM nodes*, with no virtual DOM and no runtime dependency. `.jsx`
+files build the static chrome (toolbars, modal, filter panel, cards); the
+section-aware drag-and-drop in `src/drag.js` stays imperative and operates on
+those same real nodes, so the two coexist without a framework runtime owning the
+DOM. Editor support comes from `jsconfig.json` (points JSX at our `h`/`Fragment`
+rather than React).
+
+You only need Node when you change the frontend JS/JSX (files under
 `python/static/src/`). CSS, `index.html` and the Python backend are served
 directly and need no build.
 
@@ -100,8 +109,8 @@ Passenger's WSGI interface (`python/db.py` talks to MySQL via PyMySQL).
 | `passenger_wsgi.py` | cPanel/Passenger WSGI entry point (wraps the ASGI app) |
 | `python/seed.py`  | Loads `seed.yaml` into the DB (only if empty) |
 | `python/static/`  | `index.html`, `style.css`, and the built `build/app.js` |
-| `python/static/src/` | The UI as ES modules (Vite source — see *Frontend build*) |
-| `vite.config.js` / `package.json` | Frontend bundling config and npm scripts |
+| `python/static/src/` | The UI as ES modules + `.jsx` views (Vite source — see *Frontend build*) |
+| `vite.config.js` / `jsconfig.json` / `package.json` | Frontend bundling + JSX config and npm scripts |
 
 The database lives at `python/squid.db` (git-ignored). Override the path with
 the `SQUID_DB_PATH` env var.

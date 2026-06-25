@@ -17,6 +17,14 @@ export default defineConfig({
   // Dev server roots at the static dir so /static/src/* and index.html resolve
   // the same way the browser sees them in production.
   root: STATIC,
+  // JSX without React: esbuild rewrites <div/> to h(...) and <>…</> to
+  // Fragment(...), our own factory in src/dom.js that returns real DOM nodes.
+  // No runtime dependency, no VDOM. Each .jsx file imports { h, Fragment }.
+  esbuild: {
+    jsx: 'transform',
+    jsxFactory: 'h',
+    jsxFragment: 'Fragment',
+  },
   build: {
     outDir: 'build',
     emptyOutDir: true,

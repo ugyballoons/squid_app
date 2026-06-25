@@ -11,7 +11,7 @@
 import { State, History, keepEmptySectionAt, pruneEmptySections } from './state.js';
 import { refreshUndoButtons } from './order.js';
 import { UI } from './ui.js';
-import { renderSet } from './views/setlist.js';
+import { renderSet } from './views/setlist.jsx';
 
 export function attachDrag(item, wrap) {
   const grip = item.querySelector('.grip');

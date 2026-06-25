@@ -1,0 +1,15 @@
+{
+  // Editor support for the JSX-without-React setup (matches vite.config.js).
+  // Tells VS Code / TS the JSX factory is our own h()/Fragment in dom.js, so it
+  // doesn't assume React types and flag spurious errors on .jsx files.
+  "compilerOptions": {
+    "module": "esnext",
+    "target": "es2019",
+    "moduleResolution": "bundler",
+    "checkJs": false,
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment"
+  },
+  "include": ["python/static/src/**/*"]
+}
