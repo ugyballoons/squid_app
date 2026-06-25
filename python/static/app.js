@@ -91,8 +91,59 @@ const API = {
 };
 
 // ---- State -------------------------------------------------------------- //
+// Lightweight per-device session memory: remembers the last view and set list
+// across page refreshes via localStorage. Best-effort — never throws.
+const Session = {
+  KEY: 'squid.session',
+  load() {
+    try { return JSON.parse(localStorage.getItem(this.KEY)) || {}; }
+    catch { return {}; }
+  },
+  save(patch) {
+    try { localStorage.setItem(this.KEY, JSON.stringify({ ...this.load(), ...patch })); }
+    catch { /* storage unavailable (private mode etc.) — ignore */ }
+  },
+};
+const _session = Session.load();
+
+// ---- Undo/redo for set-list ordering ------------------------------------ //
+// History is per set list and lives only for the session (in memory). A
+// snapshot is the ordered list of {song_id, section}; we compare/restore by
+// that shape so it's independent of the live song objects.
+const History = {
+  setlistId: null,
+  undo: [],
+  redo: [],
+  MAX: 50,
+
+  // Point history at a set list, clearing any history from a different one.
+  use(id) {
+    if (this.setlistId !== id) { this.setlistId = id; this.undo = []; this.redo = []; }
+  },
+  // The current order as a comparable snapshot.
+  snapshot() {
+    return (State.current?.songs || []).map(s => ({ song_id: s.id, section: s.section || 'Set 1' }));
+  },
+  same(a, b) {
+    return a.length === b.length &&
+      a.every((x, i) => x.song_id === b[i].song_id && x.section === b[i].section);
+  },
+  // Record the order as it was *before* a change. Call right before mutating.
+  push(prev) {
+    prev = prev || this.snapshot();
+    const top = this.undo[this.undo.length - 1];
+    if (top && this.same(top, prev)) return; // no-op change, don't stack dupes
+    this.undo.push(prev);
+    if (this.undo.length > this.MAX) this.undo.shift();
+    this.redo = []; // a new edit invalidates the redo branch
+  },
+  canUndo() { return this.undo.length > 0; },
+  canRedo() { return this.redo.length > 0; },
+  clear() { this.undo = []; this.redo = []; },
+};
+
 const State = {
-  tab: 'songs',
+  tab: _session.tab === 'set' ? 'set' : 'songs',
   songs: [],
   search: '',
   // Filters for the song list. Empty string = no filter.
@@ -100,9 +151,14 @@ const State = {
   filterOpen: false,
   singers: { primary: ['Ric', 'Eddy'], all: ['Ric', 'Eddy'] },
   setlists: [],
-  currentSetlistId: null,
+  currentSetlistId: Number.isInteger(_session.setlistId) ? _session.setlistId : null,
   // current.songs is the flat ordered list; each song carries a `.section`.
   current: null, // {id, name, songs:[], sections:[]}
+  // Section names to keep visible even when they hold no songs (e.g. you dragged
+  // the last song out, or just added a section). Sections aren't persisted on
+  // the server — they're derived from items — so this lives for the session and
+  // keeps an emptied section as a usable drop target. Map keyed by setlist id.
+  emptySections: {},
 };
 
 // ---- Helpers ------------------------------------------------------------ //
@@ -248,7 +304,7 @@ function renderSongs() {
         </div>
       </div>`);
     const [addBtn, editBtn] = card.querySelectorAll('.iconbtn');
-    addBtn.onclick = () => UI.toggleInSet(s);
+    addBtn.onclick = () => UI.toggleInSet(s, addBtn);
     editBtn.onclick = () => UI.songForm(s);
     list.appendChild(card);
   }
@@ -262,17 +318,67 @@ function renderSongs() {
 }
 
 // The ordered list of distinct section names in the current set list.
+//
+// Order is driven by the songs, but emptied/added sections are kept in place via
+// State.emptySections — a per-setlist record of {name, after} where `after` is
+// the section a kept-empty section should follow (null = goes first). This keeps
+// an emptied section in its original slot instead of dropping to the bottom.
 function sectionNames() {
-  const names = [];
+  const fromSongs = [];
   for (const s of State.current.songs) {
     const n = s.section || 'Set 1';
-    if (!names.includes(n)) names.push(n);
+    if (!fromSongs.includes(n)) fromSongs.push(n);
+  }
+  const kept = State.emptySections[State.current.id] || [];
+  if (!kept.length) return fromSongs.length ? fromSongs : ['Set 1'];
+
+  // Splice each kept-empty section in just after its recorded predecessor.
+  const names = [...fromSongs];
+  for (const { name, after } of kept) {
+    if (names.includes(name)) continue;
+    if (after == null) { names.unshift(name); continue; }
+    const i = names.indexOf(after);
+    if (i === -1) names.push(name);          // predecessor gone — append
+    else names.splice(i + 1, 0, name);
   }
   return names.length ? names : ['Set 1'];
 }
 
+// Mark a section as one to keep showing even when it has no songs, remembering
+// the section it currently follows so it holds its position after a re-render.
+function keepEmptySection(name) {
+  // Find which section currently precedes `name` so we can re-insert it there.
+  const order = sectionNames();
+  const idx = order.indexOf(name);
+  keepEmptySectionAt(name, idx > 0 ? order[idx - 1] : null);
+}
+
+// Same, but with the predecessor supplied explicitly (used by the drag commit,
+// where State.current.songs is mid-update so sectionNames() would be stale).
+function keepEmptySectionAt(name, after) {
+  const id = State.current.id;
+  const list = State.emptySections[id] || (State.emptySections[id] = []);
+  const existing = list.find(e => e.name === name);
+  if (existing) existing.after = after; // refresh position if already tracked
+  else list.push({ name, after });
+}
+
+// Drop kept-empty entries for sections that now hold songs (they'll render from
+// the songs) or that no longer appear at all.
+function pruneEmptySections() {
+  const id = State.current?.id;
+  if (id == null || !State.emptySections[id]) return;
+  const occupied = new Set(State.current.songs.map(s => s.section || 'Set 1'));
+  State.emptySections[id] = State.emptySections[id].filter(e => !occupied.has(e.name));
+}
+
 // ---- View: Set list ----------------------------------------------------- //
 function renderSet() {
+  // Never rebuild the list while a drag is active: it would replace the rows
+  // out from under the in-flight drag, and a pointermove landing afterwards
+  // could re-attach the now-orphaned dragged row into the fresh list (the
+  // momentary "third song"). Defer until the drag ends.
+  if (dragState) { pendingRenderSet = true; return; }
   const view = $('#view');
   const opts = State.setlists.map(s =>
     `<option value="${s.id}" ${s.id === State.currentSetlistId ? 'selected' : ''}>${esc(s.name)} (${s.song_count})</option>`).join('');
@@ -297,6 +403,9 @@ function renderSet() {
     return;
   }
 
+  // Scope undo history to the set list being shown.
+  History.use(State.current.id);
+
   const songs = State.current.songs;
   const names = sectionNames();
   const multi = names.length > 1;
@@ -311,13 +420,16 @@ function renderSet() {
   body.appendChild(el(`
     <div>
       <div class="toolbar">
+        <button class="btn ghost" id="undoBtn" onclick="UI.undo()" title="Undo (⌘Z)" aria-label="Undo">↶ Undo</button>
+        <button class="btn ghost" id="redoBtn" onclick="UI.redo()" title="Redo (⌘⇧Z)" aria-label="Redo">↷ Redo</button>
         <button class="btn ghost" onclick="UI.renameSetlist()">✎ Rename</button>
         <button class="btn ghost" onclick="UI.duplicateSetlist()">⧉ Duplicate</button>
-        <button class="btn ghost" onclick="UI.show('songs')">+ Songs</button>
+        <button class="btn danger" onclick="UI.deleteSetlist()">🗑 Delete</button>
         <a class="btn primary" href="/print/${State.current.id}" target="_blank" rel="noopener">🖨 Print</a>
       </div>
       <p class="count">${songs.length} song${songs.length === 1 ? '' : 's'} in ${names.length} section${names.length === 1 ? '' : 's'}${lenNote ? ' · ' + lenNote : ''}</p>
     </div>`));
+  refreshUndoButtons();
 
   if (!songs.length) {
     body.appendChild(el(`<div class="empty"><p>This set is empty.</p>
@@ -347,23 +459,16 @@ function renderSet() {
     inSec.forEach((o, localPos) => {
       const s = o.s, band = tempoBand(s.tempo_min, s.tempo_max);
       const item = el(`
-        <div class="so-item" draggable="true" data-id="${s.id}" style="border-left-color:${keyColor(s.key)}">
+        <div class="so-item" data-id="${s.id}" style="border-left-color:${keyColor(s.key)}">
           <div class="grip" title="Drag to reorder">⠿</div>
           <div class="pos">${localPos + 1}</div>
           <div class="main">
             <div class="title">${esc(s.title)}</div>
             <div class="meta">${s.singer ? esc(s.singer) + ' · ' : ''}${s.key ? 'Key ' + esc(s.key) + ' · ' : ''}harp <b>${esc(s.cross_harp || '—')}</b>${s.length_min != null ? ' · ' + s.length_min + 'm' : ''}${band ? ' · ' + band.label : ''}</div>
           </div>
-          <div class="so-reorder">
-            <button title="Up">▲</button>
-            <button title="Down">▼</button>
-          </div>
           <button class="iconbtn danger" title="Remove" style="color:var(--danger)">✕</button>
         </div>`);
-      const [upBtn, downBtn] = item.querySelectorAll('.so-reorder button');
-      upBtn.onclick = () => UI.moveInSection(name, localPos, -1);
-      downBtn.onclick = () => UI.moveInSection(name, localPos, 1);
-      item.querySelector('.iconbtn.danger').onclick = () => UI.removeFromSet(o.idx);
+      item.querySelector('.iconbtn.danger').onclick = () => UI.removeFromSet(s.id, item);
       attachDrag(item, wrap);
       wrap.appendChild(item);
     });
@@ -382,53 +487,247 @@ function renderSet() {
 }
 
 // ---- Drag-and-drop reordering (section-aware) --------------------------- //
-// Items can be dragged within a section or across sections; the dragged item
-// takes on the section of whichever list it ends up in. After a drop we rebuild
-// the flat ordered list (with per-song sections) from the DOM.
+// Pointer Events power this so it works identically with mouse, touch and pen
+// (HTML5 drag-and-drop never fires from touch, so dragging was dead on phones).
+// The drag is started only from the grip handle, which keeps the rest of the
+// row free for normal page scrolling on a touchscreen. While dragging we move
+// the row through the DOM live — within a section or across sections — and on
+// release rebuild the flat ordered list (with per-song sections) from the DOM.
 function attachDrag(item, wrap) {
-  item.addEventListener('dragstart', (e) => {
-    item.classList.add('dragging');
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', item.dataset.id);
+  const grip = item.querySelector('.grip');
+  if (!grip) return;
+  grip.addEventListener('pointerdown', (e) => startPointerDrag(e, item));
+}
+
+// The row currently being dragged, plus a small autoscroll loop so you can drag
+// past the top/bottom of a long set on a short screen.
+let dragState = null;
+// Set when a renderSet() is requested mid-drag; flushed when the drag ends.
+let pendingRenderSet = false;
+
+function startPointerDrag(e, item) {
+  // Only the primary button / single touch starts a drag.
+  if (e.button != null && e.button !== 0) return;
+  // Ignore a second pointer starting a drag while one is already in progress —
+  // two concurrent drags fight over the same rows and can flash a stray row.
+  if (dragState) return;
+  e.preventDefault();
+  item.classList.add('dragging');
+  // Capture so we keep getting moves even if the finger drifts off the grip.
+  try { e.target.setPointerCapture(e.pointerId); } catch {}
+  // grabDy: where within the row the finger landed, so the row tracks the
+  // finger from that point rather than snapping its top to the cursor.
+  const rect = item.getBoundingClientRect();
+  dragState = {
+    item, pointerId: e.pointerId, target: e.target, scrollTimer: null,
+    grabDy: e.clientY - rect.top, lastY: e.clientY,
+    // Snapshot the order before the drag so it can be pushed to undo history
+    // when (and only when) the drag actually changes something.
+    before: History.snapshot(),
+  };
+
+  const onMove = (ev) => onPointerDragMove(ev);
+  const onUp = (ev) => {
+    if (ev.pointerId !== dragState.pointerId) return;
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onUp);
+    endPointerDrag();
+  };
+  document.addEventListener('pointermove', onMove, { passive: false });
+  document.addEventListener('pointerup', onUp);
+  document.addEventListener('pointercancel', onUp);
+}
+
+function onPointerDragMove(e) {
+  if (!dragState || e.pointerId !== dragState.pointerId) return;
+  e.preventDefault(); // stop the page scrolling under the finger while dragging
+  const item = dragState.item;
+  const y = e.clientY;
+
+  // Which section list is the finger over? Reparent the row into it so songs
+  // can be moved between sections, then position within that list.
+  const wraps = [...document.querySelectorAll('.sortable')];
+  const overWrap = wraps.find(w => {
+    const r = w.getBoundingClientRect();
+    return y >= r.top && y <= r.bottom;
   });
-  item.addEventListener('dragend', () => {
-    item.classList.remove('dragging');
-    document.querySelectorAll('.dragover').forEach(n => n.classList.remove('dragover'));
-    commitOrderFromDom();
+  if (overWrap) {
+    const siblings = [...overWrap.querySelectorAll('.so-item')].filter(n => n !== item);
+    const after = siblings.find(n => {
+      const r = n.getBoundingClientRect();
+      return y < r.top + r.height / 2;
+    });
+    // Only touch the DOM (and run the slide animation) when the order changes.
+    const willChange = after ? item.nextSibling !== after : overWrap.lastElementChild !== item;
+    if (willChange) {
+      flipReorder(() => {
+        if (after) overWrap.insertBefore(item, after);
+        else overWrap.appendChild(item);
+      });
+      renumberPositions();
+    }
+  }
+
+  dragState.lastY = y;
+  followFinger(y);
+  // Autoscroll when near the top/bottom edge of the viewport.
+  autoscrollNearEdge(y);
+}
+
+// Glue the dragged row to the finger: offset it so the point the user grabbed
+// stays under the pointer. Measured against the row's *resting* layout position
+// (transform cleared first) so reorders underneath don't make it jump.
+function followFinger(y) {
+  const item = dragState.item;
+  item.style.transition = 'none';
+  item.style.transform = '';
+  const rect = item.getBoundingClientRect();
+  const restTop = rect.top;
+  let offset = y - dragState.grabDy - restTop;
+  // Clamp travel to the set-list area so a fast drag can't fling the row up
+  // over the toolbar/selector (where it looked like a stray extra song) or
+  // below the last section. Bounds = top of the first list .. bottom of last.
+  const lists = [...document.querySelectorAll('.sortable')];
+  if (lists.length) {
+    const top = lists[0].getBoundingClientRect().top;
+    const bottom = lists[lists.length - 1].getBoundingClientRect().bottom;
+    const minOffset = top - restTop;                 // row top can't go above list top
+    const maxOffset = bottom - rect.height - restTop; // row bottom can't go below list bottom
+    offset = Math.max(minOffset, Math.min(maxOffset, offset));
+  }
+  item.style.transform = `translateY(${offset}px)`;
+}
+
+// FLIP: animate the rows that shift when the dragged row is reinserted, so they
+// visibly slide into place instead of jumping. The dragged row itself is left
+// alone — it's tracking the finger and should not be transitioned.
+function flipReorder(mutate) {
+  const rows = [...document.querySelectorAll('.so-item')].filter(n => n !== dragState.item);
+  // Snap any rows still mid-animation to their resting position before we
+  // measure, so deltas are computed from real layout, not a tweened transform.
+  rows.forEach(n => { n.style.transition = 'none'; n.style.transform = ''; });
+  const first = new Map(rows.map(n => [n, n.getBoundingClientRect().top]));
+  mutate();
+  for (const n of rows) {
+    const delta = first.get(n) - n.getBoundingClientRect().top;
+    if (!delta) continue;
+    n.style.transition = 'none';
+    n.style.transform = `translateY(${delta}px)`;
+    // Next frame: clear the offset and let the transition animate to zero.
+    requestAnimationFrame(() => {
+      n.style.transition = 'transform .18s ease';
+      n.style.transform = '';
+    });
+  }
+}
+
+function autoscrollNearEdge(y) {
+  const margin = 60, speed = 12;
+  let dy = 0;
+  if (y < margin) dy = -speed;
+  else if (y > window.innerHeight - margin) dy = speed;
+  dragState.scrollDy = dy;
+  if (dy && dragState.scrollTimer == null) {
+    dragState.scrollTimer = setInterval(() => {
+      window.scrollBy(0, dragState.scrollDy || 0);
+      // Keep the row pinned under the finger as the page scrolls beneath it.
+      followFinger(dragState.lastY);
+    }, 16);
+  } else if (!dy && dragState.scrollTimer != null) {
+    clearInterval(dragState.scrollTimer);
+    dragState.scrollTimer = null;
+  }
+}
+
+function endPointerDrag() {
+  if (!dragState) return;
+  if (dragState.scrollTimer != null) clearInterval(dragState.scrollTimer);
+  try { dragState.target.releasePointerCapture(dragState.pointerId); } catch {}
+  const item = dragState.item;
+  item.classList.remove('dragging');
+  // Settle: let the dragged row slide from where the finger left it back into
+  // its resting slot, instead of snapping. Other rows already sit at rest.
+  document.querySelectorAll('.so-item').forEach(n => {
+    if (n !== item) { n.style.transition = ''; n.style.transform = ''; }
   });
-  item.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    const dragging = document.querySelector('.dragging');
-    if (!dragging || dragging === item) return;
-    const rect = item.getBoundingClientRect();
-    const after = e.clientY > rect.top + rect.height / 2;
-    item.parentNode.insertBefore(dragging, after ? item.nextSibling : item);
-  });
-  // Allow dropping into an empty area of a section list.
-  wrap.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    const dragging = document.querySelector('.dragging');
-    if (dragging && !wrap.querySelector('.so-item')) wrap.appendChild(dragging);
+  item.style.transition = 'transform .15s ease';
+  item.style.transform = '';
+  const done = () => { item.style.transition = ''; item.removeEventListener('transitionend', done); };
+  item.addEventListener('transitionend', done);
+  const before = dragState.before;
+  dragState = null;
+  commitOrderFromDom(before);
+  // Flush any render that was deferred because it arrived mid-drag.
+  if (pendingRenderSet) { pendingRenderSet = false; renderSet(); }
+}
+
+// Renumber the .pos labels live from the current DOM order, per section, so the
+// numbers track the drag instead of waiting for the post-save re-render.
+function renumberPositions() {
+  document.querySelectorAll('.sortable').forEach(wrap => {
+    wrap.querySelectorAll('.so-item').forEach((n, i) => {
+      const pos = n.querySelector('.pos');
+      if (pos) pos.textContent = i + 1;
+    });
   });
 }
 
-function commitOrderFromDom() {
-  const byId = new Map(State.current.songs.map(s => [s.id, s]));
+function commitOrderFromDom(before) {
+  const cur = State.current.songs;
+  const byId = new Map(cur.map(s => [s.id, s]));
+  // Snapshot current sections *before* the rebuild mutates them, so the
+  // change-detection below can see a section-only move (same song order, new
+  // section) — otherwise mutating s.section in place defeats the comparison.
+  const prevSection = new Map(cur.map(s => [s.id, s.section || 'Set 1']));
+
   const rebuilt = [];
+  const seen = new Set();
+  // Section names present as wraps in the DOM (in order) and which of them the
+  // drag left without any songs.
+  const domSections = [];
+  const emptiedNow = [];
   document.querySelectorAll('.sortable').forEach(wrap => {
     const section = wrap.dataset.section || 'Set 1';
-    wrap.querySelectorAll('.so-item').forEach(n => {
-      const s = byId.get(+n.dataset.id);
-      if (s) { s.section = section; rebuilt.push(s); }
+    domSections.push(section);
+    const items = wrap.querySelectorAll('.so-item');
+    if (!items.length) emptiedNow.push(section);
+    items.forEach(n => {
+      const id = +n.dataset.id;
+      // A song appears at most once per set (the All Songs toggle enforces this).
+      // Guard here too so a stray duplicate row can never be committed twice —
+      // which previously surfaced as a song appearing at both ends after a drag.
+      if (seen.has(id)) return;
+      const s = byId.get(id);
+      if (s) { s.section = section; rebuilt.push(s); seen.add(id); }
     });
   });
   if (!rebuilt.length) return;
-  const cur = State.current.songs;
   const unchanged = rebuilt.length === cur.length &&
-    rebuilt.every((s, i) => s === cur[i] && s.section === (cur[i].section || 'Set 1'));
-  State.current.songs = rebuilt;
+    rebuilt.every((s, i) => s === cur[i] && (s.section || 'Set 1') === prevSection.get(s.id));
   if (unchanged) return;
-  UI.saveOrder();
+
+  // Did the set of occupied sections change? If so the headers/placeholders are
+  // now stale and we must re-render (the drag has ended by the time we commit).
+  const beforeSecs = new Set(prevSection.values());
+  if (before) History.push(before); // record the pre-drag order for undo
+  State.current.songs = rebuilt;
+
+  // Keep any section the drag emptied visible (as a drop target), positioned
+  // after its DOM predecessor; drop kept-empty entries that regained songs.
+  emptiedNow.forEach(name => {
+    const i = domSections.indexOf(name);
+    keepEmptySectionAt(name, i > 0 ? domSections[i - 1] : null);
+  });
+  pruneEmptySections();
+
+  const afterSecs = new Set(rebuilt.map(s => s.section || 'Set 1'));
+  const sectionsChanged = beforeSecs.size !== afterSecs.size ||
+    [...beforeSecs].some(s => !afterSecs.has(s));
+
+  // rerender when membership changed so stale placeholders/headers are rebuilt.
+  UI.saveOrder({ rerender: sectionsChanged, optimistic: sectionsChanged });
+  refreshUndoButtons();
 }
 
 // ---- Song add/edit modal ------------------------------------------------ //
@@ -588,13 +887,14 @@ function closeModal() { $('#modal-root').innerHTML = ''; }
 const UI = {
   show(tab) {
     State.tab = tab;
+    Session.save({ tab });
     $('#tab-songs').classList.toggle('active', tab === 'songs');
     $('#tab-set').classList.toggle('active', tab === 'set');
     tab === 'songs' ? renderSongs() : renderSet();
   },
   songForm(song) { songForm(song); },
 
-  async toggleInSet(song) {
+  async toggleInSet(song, btn) {
     if (!State.current) {
       // No active set list — help the user pick or make one.
       if (!State.setlists.length) {
@@ -610,17 +910,29 @@ const UI = {
     }
     const songs = State.current.songs;
     const idx = songs.findIndex(s => s.id === song.id);
-    if (idx >= 0) {
-      songs.splice(idx, 1);
-    } else {
+    const adding = idx < 0;
+    if (adding) {
       // Add to the last section in use (so new picks land in the section the
       // user is currently building).
       const names = sectionNames();
       songs.push({ ...song, section: names[names.length - 1] });
+    } else {
+      songs.splice(idx, 1);
     }
-    State.current = await persistOrder();
-    toast(idx >= 0 ? 'Removed from set' : `Added to “${State.current.name}”`);
-    renderSongs();
+
+    // Respond instantly: flip the button and pop it, then persist in the
+    // background instead of waiting on the network before showing the change.
+    if (btn) {
+      btn.classList.toggle('in', adding);
+      btn.classList.toggle('add', !adding);
+      btn.textContent = adding ? '✓' : '+';
+      btn.title = adding ? 'In set' : 'Add to set';
+      btn.classList.remove('pop'); void btn.offsetWidth; btn.classList.add('pop');
+    }
+    toast(adding ? `Added to “${State.current.name}”` : 'Removed from set');
+
+    try { State.current = await persistOrder(); }
+    catch { renderSongs(); } // reconcile UI if the save failed
   },
 
   async newSetlist() {
@@ -649,31 +961,112 @@ const UI = {
     toast(`Copied to “${copy.name}”`);
   },
 
+  async deleteSetlist() {
+    if (!State.current) return;
+    const name = State.current.name;
+    const n = State.current.songs.length;
+    const detail = n ? ` and its ${n} song${n === 1 ? '' : 's'}` : '';
+    if (!confirm(`Delete set list “${name}”${detail}? This can't be undone.`)) return;
+    const deletedId = State.current.id;
+    await API.deleteSetlist(deletedId);
+    History.clear();
+    State.setlists = await API.setlists();
+    // Fall back to another set list if one remains, otherwise show none.
+    const next = State.setlists[0]?.id ?? null;
+    await UI.selectSetlist(next);
+    toast(`Deleted “${name}”`);
+  },
+
   async selectSetlist(id, stayOnSongs) {
     State.currentSetlistId = id;
+    Session.save({ setlistId: id });
+    History.use(id); // scope (or clear) undo history to the chosen set list
     State.current = id ? await API.getSetlist(id) : null;
     if (!stayOnSongs) renderSet(); else renderSongs();
   },
 
-  async saveOrder() {
+  // Persist the current order.
+  //  - rerender:false  → caller already updated the DOM (e.g. a drag); just save.
+  //  - optimistic:true → render the new state from State.current *now*, then
+  //                      save in the background so the UI never waits on the
+  //                      network. On failure we reload the server's truth.
+  async saveOrder({ rerender = true, optimistic = false } = {}) {
+    if (optimistic) {
+      if (rerender) renderSet();
+      persistOrder()
+        .then(cur => { State.current = cur; })
+        .catch(() => { toast('Save failed — reloading'); UI.selectSetlist(State.currentSetlistId); });
+      return;
+    }
     State.current = await persistOrder();
-    renderSet();
+    // After a drag the live DOM already reflects the new order, so re-rendering
+    // is both redundant and harmful: if the user has begun another drag while
+    // the save is in flight, renderSet() rebuilds the rows out from under that
+    // drag and a row can momentarily appear duplicated. Skip it in that case.
+    if (rerender) renderSet();
   },
 
-  // Move a song up/down within its own section (delta -1 or +1).
-  moveInSection(section, localPos, delta) {
+  // Remove a song from the set. Responds instantly: the row collapses/fades out
+  // while the order is persisted in the background (no full re-render, so the
+  // remaining rows don't flash). The numbers renumber live as it leaves.
+  removeFromSet(id, item) {
     const songs = State.current.songs;
-    const idxs = songs.map((s, i) => i).filter(i => (songs[i].section || 'Set 1') === section);
-    const target = localPos + delta;
-    if (target < 0 || target >= idxs.length) return;
-    const a = idxs[localPos], b = idxs[target];
-    [songs[a], songs[b]] = [songs[b], songs[a]];
-    UI.saveOrder();
-  },
+    const idx = songs.findIndex(s => s.id === id);
+    if (idx === -1) return;
+    History.push();            // record order before the removal for undo
+    songs.splice(idx, 1);
+    refreshUndoButtons();
 
-  async removeFromSet(idx) {
-    State.current.songs.splice(idx, 1);
-    await UI.saveOrder();
+    // Persist quietly in the background; re-render only once both the save and
+    // the exit animation are done, so nothing flashes mid-animation.
+    let animDone = false, saved = false;
+    const settle = () => { if (animDone && saved) renderSet(); };
+    persistOrder()
+      .then(cur => { State.current = cur; saved = true; settle(); })
+      .catch(() => UI.saveOrder());
+
+    if (item) {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        item.removeEventListener('transitionend', finish);
+        item.remove();
+        renumberPositions();
+        animDone = true;
+        settle();
+      };
+
+      const reduceMotion = window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduceMotion) {
+        finish(); // honour the OS "Reduce Motion" setting — remove immediately
+      } else {
+        // Pin the current height as an explicit start value (height:auto can't
+        // be transitioned). .removing only supplies the transition timing; we
+        // drive the from/to values here so there's a real start state.
+        item.style.height = item.offsetHeight + 'px';
+        item.classList.add('removing');
+        // Two rAFs (not one): mobile Safari can coalesce a single rAF style
+        // change into the same recalc as the class add, so the start state
+        // never paints and the row jumps. A second frame guarantees the
+        // browser commits the start state before we flip to the end state.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          item.style.height = '0px';
+          item.style.opacity = '0';
+          item.style.transform = 'translateX(110%)';
+          item.style.paddingTop = '0';
+          item.style.paddingBottom = '0';
+          item.style.borderTopWidth = '0';
+          item.style.borderBottomWidth = '0';
+          item.style.marginBottom = '-.55rem'; // absorb the flex gap as it collapses
+        }));
+        item.addEventListener('transitionend', finish);
+        setTimeout(finish, 500); // safety net if transitionend never fires
+      }
+    } else {
+      animDone = true;
+    }
   },
 
   addSection() {
@@ -681,9 +1074,10 @@ const UI = {
     if (!name || !name.trim()) return;
     const trimmed = name.trim();
     if (sectionNames().includes(trimmed)) { toast('Section already exists'); return; }
-    // An empty section has no rows to persist yet, so show it transiently; it
-    // becomes permanent as soon as a song is dragged (or added) into it.
-    renderSetWithPending(trimmed);
+    // Keep the (empty) section visible so songs can be dragged into it. It
+    // becomes a normal, persisted section as soon as a song lands in it.
+    keepEmptySection(trimmed);
+    renderSet();
     toast(`Drag songs into “${trimmed}”`);
   },
 
@@ -691,8 +1085,17 @@ const UI = {
     const name = prompt('Rename section:', oldName);
     if (!name || !name.trim() || name.trim() === oldName) return;
     const trimmed = name.trim();
+    History.push();
     State.current.songs.forEach(s => { if ((s.section || 'Set 1') === oldName) s.section = trimmed; });
-    UI.saveOrder();
+    // Carry the rename across to the kept-empty bookkeeping (both the section's
+    // own entry and any other entry positioned after it).
+    const kept = State.emptySections[State.current.id];
+    if (kept) kept.forEach(e => {
+      if (e.name === oldName) e.name = trimmed;
+      if (e.after === oldName) e.after = trimmed;
+    });
+    UI.saveOrder({ optimistic: true });
+    refreshUndoButtons();
   },
 
   removeSection(name) {
@@ -700,8 +1103,33 @@ const UI = {
     const names = sectionNames();
     const fallback = names.find(n => n !== name) || 'Set 1';
     if (!confirm(`Remove section “${name}”? Its songs move into “${fallback}”.`)) return;
+    History.push();
     State.current.songs.forEach(s => { if ((s.section || 'Set 1') === name) s.section = fallback; });
-    UI.saveOrder();
+    // Drop it from the kept-empty list so it doesn't linger as an empty target,
+    // and repoint anything that followed it to its predecessor instead.
+    const kept = State.emptySections[State.current.id];
+    if (kept) State.emptySections[State.current.id] =
+      kept.filter(e => e.name !== name).map(e => (e.after === name ? { ...e, after: null } : e));
+    UI.saveOrder({ optimistic: true });
+    refreshUndoButtons();
+  },
+
+  // Undo/redo the set-list ordering. Each swaps the current order with the
+  // adjacent history entry, updating the DOM immediately and saving in the
+  // background (no waiting on the network).
+  undo() {
+    if (!History.canUndo() || !State.current) return;
+    History.redo.push(History.snapshot());
+    applyOrderSnapshot(History.undo.pop());
+    UI.saveOrder({ optimistic: true });
+    refreshUndoButtons();
+  },
+  redo() {
+    if (!History.canRedo() || !State.current) return;
+    History.undo.push(History.snapshot());
+    applyOrderSnapshot(History.redo.pop());
+    UI.saveOrder({ optimistic: true });
+    refreshUndoButtons();
   },
 };
 window.UI = UI;
@@ -713,42 +1141,54 @@ async function persistOrder() {
   return API.setItems(State.current.id, items);
 }
 
-// Re-render the set with an extra, currently-empty section shown at the end so
-// the user can drag songs into it.
-function renderSetWithPending(pendingName) {
-  renderSet();
-  const body = $('#set-body');
-  if (!body) return;
-  const head = el(`
-    <div class="sec-head pending">
-      <span class="sec-name">${esc(pendingName)}</span>
-      <span class="sec-meta">new · drag songs here</span>
-    </div>`);
-  const wrap = el(`<div class="list sortable" data-section="${esc(pendingName)}"></div>`);
-  wrap.appendChild(el(`<div class="empty small"><p>Drag songs here, or add from the Songs tab.</p></div>`));
-  // attach a drop target
-  wrap.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    const dragging = document.querySelector('.dragging');
-    if (dragging && !wrap.querySelector('.so-item')) wrap.appendChild(dragging);
-  });
-  // insert before the "+ Add section" button if present
-  const addBtn = body.querySelector('.addsec');
-  body.insertBefore(head, addBtn);
-  body.insertBefore(wrap, addBtn);
+// Rebuild State.current.songs to match a {song_id, section} snapshot, reusing
+// the existing song objects. Songs missing from the snapshot are dropped; any
+// not in the snapshot are appended (defensive — shouldn't normally happen).
+function applyOrderSnapshot(snap) {
+  const byId = new Map(State.current.songs.map(s => [s.id, s]));
+  const used = new Set();
+  const next = [];
+  for (const { song_id, section } of snap) {
+    const s = byId.get(song_id);
+    if (s && !used.has(song_id)) { s.section = section; next.push(s); used.add(song_id); }
+  }
+  for (const s of State.current.songs) if (!used.has(s.id)) next.push(s);
+  State.current.songs = next;
+}
+
+// Enable/disable the Undo/Redo buttons to match the current history state.
+function refreshUndoButtons() {
+  const u = $('#undoBtn'), r = $('#redoBtn');
+  if (u) u.disabled = !History.canUndo();
+  if (r) r.disabled = !History.canRedo();
 }
 
 // ---- Boot --------------------------------------------------------------- //
 async function refreshAll() {
   [State.songs, State.setlists, State.singers] =
     await Promise.all([API.songs(), API.setlists(), API.singers()]);
+  // Restore the last-viewed set list if it still exists; otherwise clear it.
   if (State.currentSetlistId && State.setlists.some(s => s.id === State.currentSetlistId)) {
     State.current = await API.getSetlist(State.currentSetlistId);
-  } else if (!State.setlists.some(s => s.id === State.currentSetlistId)) {
+  } else {
     State.currentSetlistId = null; State.current = null;
+    Session.save({ setlistId: null });
   }
-  State.tab === 'songs' ? renderSongs() : renderSet();
+  // Route through show() so the restored tab also highlights the right button.
+  UI.show(State.tab);
 }
+
+// Keyboard shortcuts for undo/redo while viewing a set list (desktop).
+document.addEventListener('keydown', (e) => {
+  if (State.tab !== 'set' || !State.current) return;
+  const mod = e.metaKey || e.ctrlKey;
+  if (!mod || e.key.toLowerCase() !== 'z') return;
+  // Don't hijack undo while typing in an input/textarea.
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  e.preventDefault();
+  if (e.shiftKey) UI.redo(); else UI.undo();
+});
 
 refreshAll().catch(err => {
   $('#view').innerHTML = `<div class="empty"><p>Couldn't load.</p><p>${esc(err.message)}</p></div>`;
