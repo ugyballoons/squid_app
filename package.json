@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "watch": "vite build --watch",
+    "preview": "vite preview",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
     "vite": "^6.0.0"

@@ -1,0 +1,33 @@
+#!/bin/sh
+# Keep the committed frontend bundle in sync with its source.
+#
+# The browser loads python/static/build/app.js, which is built from the ES
+# modules in python/static/src/ by Vite and committed to the repo (the
+# cPanel/Passenger host has no Node build step). If you commit a source change
+# but a stale bundle, the deployed site silently won't reflect your edit. This
+# hook rebuilds and re-stages the bundle whenever the frontend source (or its
+# build config) is part of the commit.
+#
+# Enabled via `git config core.hooksPath .githooks` (run automatically by
+# `npm install` through the "prepare" script). Skip with `git commit --no-verify`.
+
+set -e
+
+# Which staged files would affect the bundle?
+changed=$(git diff --cached --name-only --diff-filter=ACMR -- \
+  'python/static/src/**' vite.config.js package.json package-lock.json)
+
+[ -z "$changed" ] && exit 0
+
+# No Node available? Warn but don't block — the host never builds, so a commit
+# without a rebuild is recoverable, but the author should know the bundle may
+# be stale.
+if ! command -v npm >/dev/null 2>&1; then
+  echo "pre-commit: frontend source changed but npm is not available;" >&2
+  echo "            the committed bundle may be stale. Run 'npm run build' and re-commit." >&2
+  exit 0
+fi
+
+echo "pre-commit: frontend source changed — rebuilding python/static/build/app.js"
+npm run build >/dev/null
+git add python/static/build/app.js
