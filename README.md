@@ -44,6 +44,30 @@ python -m uvicorn python.main:app --reload
 
 Then open http://127.0.0.1:8000 .
 
+## Frontend build
+
+The UI is plain JS (no framework), split into ES modules under
+`python/static/src/` and bundled by [Vite](https://vitejs.dev) into
+`python/static/build/app.js`, which `index.html` loads. **The bundle is
+committed to the repo**, so the production host needs no Node — deploying is
+still just a `git pull`.
+
+You only need Node when you change the frontend JavaScript (files under
+`python/static/src/`). CSS, `index.html` and the Python backend are served
+directly and need no build.
+
+```bash
+npm install        # once; also enables the pre-commit hook (see below)
+npm run build      # rebuild python/static/build/app.js after editing src/
+npm run watch      # rebuild on every save (handy while testing via uvicorn)
+npm run dev        # Vite dev server with hot reload in the browser
+```
+
+A **pre-commit hook** (`.githooks/`, auto-enabled by `npm install`) rebuilds and
+re-stages the bundle whenever a commit touches `python/static/src/` or the build
+config, so the committed bundle can never drift out of sync with its source.
+Bypass it for a one-off with `git commit --no-verify`.
+
 ## Deploy on cPanel shared hosting (Python App / Passenger)
 
 This app runs on cPanel's **Setup Python App** (Phusion Passenger) with a MySQL
@@ -75,7 +99,9 @@ Passenger's WSGI interface (`python/db.py` talks to MySQL via PyMySQL).
 | `python/db.py`    | DB layer: SQLite locally, MySQL in production (PyMySQL) |
 | `passenger_wsgi.py` | cPanel/Passenger WSGI entry point (wraps the ASGI app) |
 | `python/seed.py`  | Loads `seed.yaml` into the DB (only if empty) |
-| `python/static/`  | `index.html`, `style.css`, `app.js` (the whole UI) |
+| `python/static/`  | `index.html`, `style.css`, and the built `build/app.js` |
+| `python/static/src/` | The UI as ES modules (Vite source — see *Frontend build*) |
+| `vite.config.js` / `package.json` | Frontend bundling config and npm scripts |
 
 The database lives at `python/squid.db` (git-ignored). Override the path with
 the `SQUID_DB_PATH` env var.
