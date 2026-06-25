@@ -1,0 +1,17 @@
+{
+  "name": "squid-set-lists-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Frontend build for Squid Set Lists. Sources live in python/static/src/; the bundle is built into python/static/build/ and committed so the cPanel/Passenger server serves it as a plain static file (no Node needed on the host).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "watch": "vite build --watch",
+    "preview": "vite preview",
+    "prepare": "git config core.hooksPath .githooks || true"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}
